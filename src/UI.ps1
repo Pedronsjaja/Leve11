@@ -4,7 +4,7 @@ $script:XamlFile=Join-Path $PSScriptRoot 'MainWindow.xaml'
 . "$PSScriptRoot\RecoveryUI.ps1"
 
 function Get-LeveLabel([string]$Value) {
-    $labels=@{Applied='Aplicado';Applying='Em aplicação';Partial='Concluído com falhas';NoChanges='Já configurado';Pending='Pendente';Restored='Restaurado';RestorePartial='Restauração incompleta';RestoreFailed='Falha ao restaurar';Conflict='Conflito preservado';Failed='Falha';Removing='Em desinstalação';Removed='Desinstalado';Settings='Ajustes';Apps='Aplicativos'}
+    $labels=@{Applied='Aplicado';Applying='Em aplicação';Partial='Concluído com falhas';NoChanges='Já configurado';AlreadyAbsent='Já ausente';Pending='Pendente';Restored='Restaurado';RestorePartial='Restauração incompleta';RestoreFailed='Falha ao restaurar';Conflict='Conflito preservado';Failed='Falha';Removing='Em desinstalação';Removed='Desinstalado';Settings='Ajustes';Apps='Aplicativos'}
     if ($labels.ContainsKey($Value)) { return $labels[$Value] }
     return $Value
 }
@@ -64,6 +64,9 @@ function Start-LeveWork([string]$Operation,$Payload,[scriptblock]$Done) {
             'Malware' { Get-LeveMalwareDiagnostic }
             'Scan' { Invoke-LeveMalwareScan -ScanType $payload -Confirm:$false }
             'Signatures' { Update-LeveDefender -Confirm:$false }
+            'SaveBaseline' {$d=Get-LeveDiagnostic;Save-LeveJson $payload $d;$d}
+            'CompareFile' {Get-LeveComparison -BaselinePath $payload}
+            'CompareSession' {Get-LeveComparison -SessionId $payload}
             default { throw 'Operação desconhecida.' }
         }
     }).AddArgument($script:EngineFile).AddArgument($Operation).AddArgument($Payload)
@@ -115,6 +118,13 @@ function Show-LeveResult($Result) {
         if ($op.Error) { $lines+=$op.Error }
     }
     $lines+="`r`nFeche o programa e reinicie quando for conveniente para comparar o uso. Nenhum aplicativo foi encerrado à força."
+    if ($Result.PSObject.Properties.Name -contains 'Measurement' -and $Result.Status -notin @('Restored','RestorePartial')) {
+        if ($Result.Measurement.Before -and $Result.Measurement.After) {
+            try {$lines+="`r`n"+(Format-LeveComparison (Compare-LeveMemory $Result.Measurement.Before $Result.Measurement.After @($Result) 'Esta operação; medição imediata'))}
+            catch {$lines+='Comparação indisponível: '+$_.Exception.Message}
+        }
+        $lines+=@($Result.Measurement.Errors)
+    }
     [void](Show-LeveDialog 'Resultado da operação' ($lines -join "`r`n"))
     Start-LeveWork 'Analyze' $null {param($r) Update-LeveView $r}
 }
@@ -141,7 +151,7 @@ function Show-LeveWindow([switch]$SmokeTest) {
     $reader=New-Object Xml.XmlNodeReader ([xml](Get-Content -LiteralPath $script:XamlFile -Raw))
     $script:Window=[Windows.Markup.XamlReader]::Load($reader)
     $script:Controls=@{}
-    foreach ($name in @('UsedText','MemoryDetail','AvailableText','ProfileText','RefreshButton','Tabs','ProfileCombo','ProfileHint','TweaksPanel','PreviewButton','StartupGrid','StartupApplyButton','StartupSettingsButton','StartupFolderButton','AppsGrid','RemoveAppsButton','InstalledSettingsButton','DiagnosticHint','ProcessGrid','ExportButton','CompareButton','EffectsButton','HistoryGrid','RestoreButton','DetailsButton','StoreButton','StatusText','BusyBar')) {
+    foreach ($name in @('UsedText','MemoryDetail','AvailableText','ProfileText','RefreshButton','Tabs','ProfileCombo','ProfileHint','TweaksPanel','PreviewButton','StartupGrid','StartupApplyButton','StartupSettingsButton','StartupFolderButton','AppsGrid','RemoveAppsButton','InstalledSettingsButton','DiagnosticHint','ProcessGrid','ExportButton','CompareButton','EffectsButton','HistoryGrid','RestoreButton','DetailsButton','StoreButton','SessionCompareButton','StatusText','BusyBar')) {
         $script:Controls[$name]=$script:Window.FindName($name)
         if ($null -eq $script:Controls[$name]) { throw "Controle ausente: $name" }
     }
@@ -191,7 +201,7 @@ function Show-LeveWindow([switch]$SmokeTest) {
         if (-not $script:Diagnostic) { return }
         $save=New-Object Microsoft.Win32.SaveFileDialog; $save.Filter='Medição JSON|*.json'; $save.FileName='Leve11-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.json'
         if ($save.ShowDialog($script:Window)) {
-            try { Save-LeveJson $save.FileName $script:Diagnostic; $script:Controls.StatusText.Text='Medição salva: '+$save.FileName }
+            try { Start-LeveWork 'SaveBaseline' $save.FileName {param($r) $script:Diagnostic=$r;$script:Controls.StatusText.Text='Referência ANTES salva com uma nova leitura. Compare com este arquivo depois dos ajustes.'} }
             catch { [void](Show-LeveDialog 'Erro ao salvar' $_.Exception.Message) }
         }
     })
@@ -200,12 +210,14 @@ function Show-LeveWindow([switch]$SmokeTest) {
         $open=New-Object Microsoft.Win32.OpenFileDialog; $open.Filter='Medição JSON|*.json'
         if ($open.ShowDialog($script:Window)) {
             try {
-                $old=Get-Content -LiteralPath $open.FileName -Raw | ConvertFrom-Json
-                if (-not ($old.PSObject.Properties.Name -contains 'UsedGB') -or -not ($old.PSObject.Properties.Name -contains 'Timestamp')) { throw 'Arquivo não é uma medição do Leve11.' }
-                $delta=[math]::Round(($script:Diagnostic.UsedGB-[double]$old.UsedGB),2)
-                [void](Show-LeveDialog 'Comparação de medições' "Anterior ($($old.Timestamp)): $($old.UsedGB) GB em uso.`r`nAtual ($($script:Diagnostic.Timestamp)): $($script:Diagnostic.UsedGB) GB em uso.`r`nVariação: $delta GB (negativo significa menos uso).`r`n`r`nEsta diferença não prova ganho causado pelos ajustes. Compare após reiniciar, com o mesmo conjunto de apps e tempo de espera. Cache, atualizações e o próprio Leve11 influenciam a leitura.")
+                Start-LeveWork 'CompareFile' $open.FileName {param($r) [void](Show-LeveDialog 'Antes, depois e resumo' (Format-LeveComparison $r))}
             } catch { [void](Show-LeveDialog 'Erro ao comparar' $_.Exception.Message) }
         }
+    })
+    $script:Controls.SessionCompareButton.Add_Click({
+        $session=$script:Controls.HistoryGrid.SelectedItem
+        if (-not $session) {[void](Show-LeveDialog 'Selecione uma sessão' 'Escolha uma sessão de ajustes ou aplicativos para comparar a RAM anterior com uma leitura atual.');return}
+        Start-LeveWork 'CompareSession' $session.Id {param($r) [void](Show-LeveDialog 'Antes, depois e resumo da sessão' (Format-LeveComparison $r))}
     })
     $script:Controls.RestoreButton.Add_Click({
         $session=$script:Controls.HistoryGrid.SelectedItem

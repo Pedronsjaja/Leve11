@@ -30,6 +30,11 @@ function Get-LeveDiagnostic {
     } catch { } # CIM fallback can report usable RAM; enough for a conservative profile.
     [pscustomobject]@{
         Timestamp=(Get-Date).ToString('o'); Build=$os.BuildNumber
+        MachineId=(Get-LeveMachineId); UserSid=(Get-LeveIdentity); BootTime=$os.LastBootUpTime.ToString('o')
+        UsedMB=[math]::Round(([double]$os.TotalVisibleMemorySize-[double]$os.FreePhysicalMemory)/1024,2)
+        AvailableMB=[math]::Round([double]$os.FreePhysicalMemory/1024,2)
+        UsableMB=[math]::Round([double]$os.TotalVisibleMemorySize/1024,2)
+        BaselineSessionIds=@(Get-LeveHistory | ForEach-Object {$_.Id})
         InstalledGB=[math]::Round($installed,2); UsableGB=[math]::Round($total,2)
         AvailableGB=[math]::Round($available,2); UsedGB=[math]::Round(($total-$available),2)
         UsedPercent=[math]::Round(100*($total-$available)/$total,1)
@@ -161,6 +166,7 @@ function Invoke-LeveApply {
         $id=(Get-Date -Format 'yyyyMMdd-HHmmss-fff')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
         $path=Join-Path $script:DataRoot ('history\'+$id+'.json')
         $session=[pscustomobject]@{ Schema=1; Id=$id; UserSid=(Get-LeveIdentity); Computer=$env:COMPUTERNAME; Created=(Get-Date).ToString('o'); Type='Settings'; Status='Applying'; Operations=$plan }
+        Initialize-LeveMeasurement $session
         Save-LeveJson $path $session
         foreach ($op in $plan) {
             try {
@@ -174,6 +180,7 @@ function Invoke-LeveApply {
             Save-LeveJson $path $session
         }
         $session.Status=if (@($plan | Where-Object Status -eq 'Failed').Count) {'Partial'} else {'Applied'}
+        Complete-LeveMeasurement $session
         Save-LeveJson $path $session
         return $session
     } finally { $lock.Dispose() }
@@ -183,7 +190,7 @@ function Get-LeveHistory {
     $folder=Join-Path $script:DataRoot 'history'
     if (-not (Test-Path -LiteralPath $folder)) { return }
     foreach ($file in Get-ChildItem -LiteralPath $folder -Filter '*.json' | Sort-Object Name -Descending) {
-        try { Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json }
+        try { Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json }
         catch { Write-Warning "Histórico ilegível: $($file.Name). Preserve o arquivo para análise." }
     }
 }
@@ -250,10 +257,12 @@ function Remove-LeveApps {
             [pscustomobject]@{ Name=$name; Title=$app.Title; Store=$app.Store; Status='Pending'; Error='' }
         })
         $session=[pscustomobject]@{Schema=1; Id=$id; UserSid=(Get-LeveIdentity); Computer=$env:COMPUTERNAME; Created=(Get-Date).ToString('o'); Type='Apps'; Status='Removing'; Operations=$ops}
+        Initialize-LeveMeasurement $session
         Save-LeveJson $path $session
         foreach ($op in $ops) {
             try {
                 $packages=@(Get-AppxPackage -Name $op.Name -ErrorAction Stop | Where-Object { $_.Name -eq $op.Name })
+                if ($packages.Count -eq 0) {$op.Status='AlreadyAbsent';continue}
                 if (@($packages | Where-Object { $_.NonRemovable -or $_.IsFramework }).Count) { throw 'Pacote protegido pelo Windows.' }
                 $op.Status='Removing'; Save-LeveJson $path $session
                 foreach ($pkg in $packages) { Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop }
@@ -262,8 +271,97 @@ function Remove-LeveApps {
             } catch { $op.Status='Failed'; $op.Error=$_.Exception.Message }
             Save-LeveJson $path $session
         }
-        $session.Status=if (@($ops | Where-Object Status -eq 'Failed').Count) {'Partial'} else {'Removed'}
+        $session.Status=if (@($ops | Where-Object Status -eq 'Failed').Count) {'Partial'} elseif (@($ops | Where-Object Status -eq 'Removed').Count) {'Removed'} else {'NoChanges'}
+        Complete-LeveMeasurement $session
         Save-LeveJson $path $session
         $session
     } finally { $lock.Dispose() }
+}
+
+function Get-LeveMemorySnapshot {
+    $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    [pscustomobject]@{Timestamp=(Get-Date).ToString('o');MachineId=(Get-LeveMachineId);UserSid=(Get-LeveIdentity);BootTime=$os.LastBootUpTime.ToString('o');Build=$os.BuildNumber;
+        UsedMB=[math]::Round(([double]$os.TotalVisibleMemorySize-[double]$os.FreePhysicalMemory)/1024,2);
+        AvailableMB=[math]::Round([double]$os.FreePhysicalMemory/1024,2);UsableMB=[math]::Round([double]$os.TotalVisibleMemorySize/1024,2)}
+}
+function Initialize-LeveMeasurement($Session) {
+    $measurement=[pscustomobject]@{Before=$null;After=$null;Errors=@()}
+    try {$measurement.Before=Get-LeveMemorySnapshot} catch {$measurement.Errors+=('Antes: '+$_.Exception.Message)}
+    $Session | Add-Member -NotePropertyName Measurement -NotePropertyValue $measurement
+}
+function Complete-LeveMeasurement($Session) {
+    try {$Session.Measurement.After=Get-LeveMemorySnapshot} catch {$Session.Measurement.Errors+=('Depois: '+$_.Exception.Message)}
+}
+function ConvertTo-LeveMemory($Snapshot) {
+    if (-not $Snapshot -or $Snapshot.PSObject.Properties.Name -notcontains 'Timestamp') {throw 'Medição ausente ou inválida.'}
+    $time=[datetimeoffset]::Parse($Snapshot.Timestamp,[Globalization.CultureInfo]::InvariantCulture)
+    $names=$Snapshot.PSObject.Properties.Name
+    if ($names -contains 'UsedMB' -and $names -contains 'AvailableMB' -and $names -contains 'UsableMB') {
+        $used=[double]$Snapshot.UsedMB;$available=[double]$Snapshot.AvailableMB;$total=[double]$Snapshot.UsableMB
+    } elseif ($names -contains 'UsedGB' -and $names -contains 'AvailableGB' -and $names -contains 'UsableGB') {
+        $used=[double]$Snapshot.UsedGB*1024;$available=[double]$Snapshot.AvailableGB*1024;$total=[double]$Snapshot.UsableGB*1024
+    } else {throw 'O arquivo não contém os valores necessários de RAM.'}
+    foreach ($n in @($used,$available,$total)) {if ([double]::IsNaN($n) -or [double]::IsInfinity($n) -or $n -lt 0) {throw 'Valores de RAM inválidos.'}}
+    if ($total -le 0 -or $used -gt ($total+20) -or $available -gt ($total+20) -or [math]::Abs(($used+$available)-$total) -gt 20) {throw 'Valores de RAM inconsistentes.'}
+    [pscustomobject]@{Timestamp=$time.ToString('o');UsedMB=$used;AvailableMB=$available;UsableMB=$total;UsedPercent=[math]::Round(100*$used/$total,2)}
+}
+function Get-LeveChangeSummary([object[]]$Sessions) {
+    $apps=@();$startup=@();$tweaks=@();$restored=@();$failed=@();$absent=@();$pending=@()
+    foreach ($session in $Sessions) {
+        foreach ($op in @($session.Operations)) {
+            $item=[pscustomobject]@{SessionId=$session.Id;Title=$op.Title;Status=$op.Status}
+            switch ($op.Status) {
+                'Removed' {if ($session.Type -eq 'Apps') {$apps+=$item}}
+                'Applied' {if ($session.Type -eq 'Settings') {if ($op.Id.StartsWith('startup:')) {$startup+=$item} else {$tweaks+=$item}}}
+                'Restored' {$restored+=$item}
+                'AlreadyAbsent' {$absent+=$item}
+                {$_ -in @('Failed','RestoreFailed','Conflict')} {$failed+=$item}
+                default {$pending+=$item}
+            }
+        }
+    }
+    [pscustomobject]@{AppsRemoved=$apps;StartupDisabled=$startup;SettingsApplied=$tweaks;Restored=$restored;FailedOrConflicted=$failed;AlreadyAbsent=$absent;Unconfirmed=$pending;
+        AppsRemovedCount=$apps.Count;StartupDisabledCount=$startup.Count;SettingsAppliedCount=$tweaks.Count;RestoredCount=$restored.Count;FailedCount=$failed.Count}
+}
+function Compare-LeveMemory($Before,$After,[object[]]$Sessions=@(),[string]$Scope='Sessão selecionada') {
+    $b=ConvertTo-LeveMemory $Before;$a=ConvertTo-LeveMemory $After
+    if ([datetimeoffset]$a.Timestamp -lt [datetimeoffset]$b.Timestamp) {throw 'A medição depois é anterior à referência.'}
+    $warnings=@()
+    foreach ($key in @('MachineId','UserSid')) {
+        if ($Before.PSObject.Properties.Name -contains $key -and $After.PSObject.Properties.Name -contains $key) {
+            if ($Before.$key -ne $After.$key) {throw 'As medições pertencem a computadores ou usuários diferentes.'}
+        } else {$warnings+='Medição antiga: identidade não pôde ser confirmada.';break}
+    }
+    if ([math]::Abs($a.UsableMB-$b.UsableMB) -gt 20) {$warnings+='A RAM utilizável mudou; as condições não são equivalentes.'}
+    if ($Before.PSObject.Properties.Name -contains 'BootTime' -and $After.PSObject.Properties.Name -contains 'BootTime' -and $Before.BootTime -eq $After.BootTime) {$warnings+='Mesma inicialização: ajustes de login podem só ter efeito após reiniciar.'}
+    $reduction=[math]::Round($b.UsedMB-$a.UsedMB,2)
+    [pscustomobject]@{Before=$b;After=$a;ReductionMB=$reduction;ReductionPercent=$(if ($b.UsedMB -gt 0) {[math]::Round(100*$reduction/$b.UsedMB,2)} else {$null});UsagePercentagePoints=[math]::Round($b.UsedPercent-$a.UsedPercent,2);AvailableDeltaMB=[math]::Round($a.AvailableMB-$b.AvailableMB,2);
+        Summary=(Get-LeveChangeSummary $Sessions);Scope=$Scope;Warnings=$warnings;
+        Note='Variação observada, não economia atribuída automaticamente ao Leve11. Compare com os mesmos apps e tempo após login. Não houve limpeza forçada de RAM. O resumo conta operações concluídas, não MB por aplicativo nem espaço em disco.'}
+}
+function Get-LeveComparison([string]$BaselinePath,[string]$SessionId) {
+    if ([bool]$BaselinePath -eq [bool]$SessionId) {throw 'Informe apenas BaselinePath ou SessionId.'}
+    $sessions=@(Get-LeveHistory)
+    if ($SessionId) {
+        $session=$sessions | Where-Object {$_.Id -eq $SessionId} | Select-Object -First 1
+        if (-not $session -or $session.PSObject.Properties.Name -notcontains 'Measurement' -or -not $session.Measurement.Before) {throw 'Esta sessão não tem medição anterior. Use uma sessão da versão 1.2 ou uma referência JSON salva.'}
+        return Compare-LeveMemory $session.Measurement.Before (Get-LeveMemorySnapshot) @($session) 'Sessão selecionada; resultados do histórico'
+    }
+    $baseline=Get-Content -LiteralPath $BaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $after=Get-LeveMemorySnapshot
+    $related=@();$scope='Arquivo antigo sem vínculo com alterações; resumo indisponível'
+    if ($baseline.PSObject.Properties.Name -contains 'BaselineSessionIds' -and $baseline.PSObject.Properties.Name -contains 'MachineId') {
+        $related=@($sessions | Where-Object {$_.Id -notin @($baseline.BaselineSessionIds) -and [datetimeoffset]$_.Created -ge [datetimeoffset]$baseline.Timestamp -and [datetimeoffset]$_.Created -le [datetimeoffset]$after.Timestamp})
+        $scope='Operações registradas após a referência; conforme estado atual do histórico'
+    }
+    Compare-LeveMemory $baseline $after $related $scope
+}
+function Format-LeveComparison($Report) {
+    $b=$Report.Before;$a=$Report.After;$s=$Report.Summary
+    $label=if ($Report.ReductionMB -gt 0) {'Redução observada'} elseif ($Report.ReductionMB -lt 0) {'Aumento observado'} else {'Sem variação observada'}
+    $percent=if ($null -ne $Report.ReductionPercent) {([math]::Abs($Report.ReductionPercent)).ToString('N2')+'% do uso anterior'} else {'percentual relativo indisponível (antes = 0)'}
+    $lines=@("ANTES: $($b.Timestamp)",('Em uso: {0:N2} GB ({1:N2} MB) | {2:N2}% da RAM' -f ($b.UsedMB/1024),$b.UsedMB,$b.UsedPercent),"DEPOIS: $($a.Timestamp)",('Em uso: {0:N2} GB ({1:N2} MB) | {2:N2}% da RAM' -f ($a.UsedMB/1024),$a.UsedMB,$a.UsedPercent),"",("${label}: {0:N2} MB / {1}" -f [math]::Abs($Report.ReductionMB),$percent),('RAM disponível: {0:N2} MB -> {1:N2} MB' -f $b.AvailableMB,$a.AvailableMB),('Redução na ocupação: {0:N2} pontos percentuais (negativo = aumento)' -f $Report.UsagePercentagePoints),'',('Apps removidos: {0} | Inicializações desativadas: {1} | Ajustes aplicados: {2}' -f $s.AppsRemovedCount,$s.StartupDisabledCount,$s.SettingsAppliedCount),('Restaurados: {0} | Falhas/conflitos: {1} | Já ausentes: {2} | Não confirmados: {3}' -f $s.RestoredCount,$s.FailedCount,@($s.AlreadyAbsent).Count,@($s.Unconfirmed).Count),$Report.Scope)
+    foreach ($group in @('AppsRemoved','StartupDisabled','SettingsApplied','Restored','FailedOrConflicted','AlreadyAbsent','Unconfirmed')) {foreach ($item in $s.$group) {$lines+="- $($item.Title) [$($item.Status)]"}}
+    $lines+='';$lines+=@($Report.Warnings);$lines+=$Report.Note
+    $lines -join "`r`n"
 }

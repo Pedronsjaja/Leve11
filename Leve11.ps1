@@ -1,10 +1,11 @@
 ﻿#requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('GUI','Analyze','Plan','Apply','Restore','RemoveApps','Drivers','Malware')][string]$Mode='GUI',
+    [ValidateSet('GUI','Analyze','Plan','Apply','Restore','RemoveApps','Drivers','Malware','Compare')][string]$Mode='GUI',
     [ValidateSet('Auto','8','12','16','32')][string]$Profile='Auto',
     [string[]]$Ids=@(),
     [string]$SessionId,
+    [string]$BaselinePath,
     [string[]]$AppNames=@(),
     [switch]$SmokeTest
 )
@@ -23,6 +24,7 @@ if ($Mode -eq 'GUI') {
     return
 }
 switch ($Mode) {
+    'Compare' {Get-LeveComparison -BaselinePath $BaselinePath -SessionId $SessionId | ConvertTo-Json -Depth 12}
     'Drivers' {Get-LeveDriverDiagnostic | ConvertTo-Json -Depth 8}
     'Malware' {Get-LeveMalwareDiagnostic | ConvertTo-Json -Depth 8}
     'Analyze' { Get-LeveDiagnostic | ConvertTo-Json -Depth 8 }
