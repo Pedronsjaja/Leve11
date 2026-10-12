@@ -152,3 +152,7 @@ O ZIP contém **10 arquivos**: iniciador, programa, seis arquivos em `src`, READ
 [Relatar problema ou sugerir melhoria](https://github.com/Pedronsjaja/Leve11/issues) · [Ver versões](https://github.com/Pedronsjaja/Leve11/releases) · [Licença MIT](LICENSE)
 
 Referências indicadas para a proposta e apresentação: [Otimizador Windows 10/11](https://github.com/raphael-c-martins/Otimizador-Windows-10-11), [TBOK Win11Optimizer](https://github.com/TheBeardofKnowledge/TBOK-Win11Optimizer), [Optimizer](https://github.com/hellzerg/optimizer) e [OtimizeWindows](https://github.com/AFaustini/OtimizeWindows). São projetos independentes; seus recursos não representam automaticamente os recursos do Leve11.
+
+## Engenharia e validacao
+
+[Estado tecnico, validacao e proximos passos](docs/engineering-status.md).
