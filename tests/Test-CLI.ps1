@@ -11,6 +11,8 @@ if ([int]$os.ProductType -ne 1 -or [int]$os.BuildNumber -lt 22000) {
     $code=$LASTEXITCODE
     $ErrorActionPreference=$previous
     if ($code -eq 0 -or $result -notmatch 'Windows 11') { throw 'CLI deve recusar Windows nao suportado.' }
+    # The nonzero child exit was the expected assertion, not a test failure.
+    $global:LASTEXITCODE=0
     'OK: CLI recusa Windows Server; perfis/WhatIf exigem Windows 11 e foram testados localmente.'
     return
 }
