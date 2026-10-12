@@ -1,6 +1,9 @@
 ﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot\..\src\Engine.ps1"
+# The CI host is Windows Server. Only this isolated fixture bypasses the
+# product gate; production and the CLI still reject unsupported systems.
+function Assert-LeveWindows { }
 $script:Passed=0
 function Assert($Condition,[string]$Message) {
     if (-not $Condition) { throw "FALHOU: $Message" }

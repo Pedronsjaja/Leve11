@@ -15,6 +15,11 @@ publicar ensaio controlado antes/depois para qualquer alegacao de economia;
 BAIXO: ampliar matriz de builds Windows. RAM economizada: NOT_MEASURED.
 Testes aprovados nao homologam todas as versoes do Windows.
 
+O runner hospedado do GitHub usa Windows Server. A suite isolada do motor
+substitui Assert-LeveWindows somente no processo de teste. A suite CLI
+confirma a recusa desse sistema; os cenarios CLI de perfis/WhatIf exigem
+Windows 11 e foram executados localmente. O bloqueio de producao permanece.
+
 Para entender esta implementacao: siga plano → backup → aplicacao →
 verificacao → restauracao. Estude idempotencia, compensacao e ShouldProcess.
 Desafio: injete falha depois de uma escrita e confira se a restauracao

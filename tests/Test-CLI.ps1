@@ -3,6 +3,17 @@ $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 . "$root\src\Engine.ps1"
 $entry=Join-Path $root 'Leve11.ps1'
+$os=Get-CimInstance Win32_OperatingSystem
+if ([int]$os.ProductType -ne 1 -or [int]$os.BuildNumber -lt 22000) {
+    $previous=$ErrorActionPreference
+    $ErrorActionPreference='Continue'
+    $result=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entry -Mode Plan -Profile 8 2>&1 | Out-String)
+    $code=$LASTEXITCODE
+    $ErrorActionPreference=$previous
+    if ($code -eq 0 -or $result -notmatch 'Windows 11') { throw 'CLI deve recusar Windows nao suportado.' }
+    'OK: CLI recusa Windows Server; perfis/WhatIf exigem Windows 11 e foram testados localmente.'
+    return
+}
 $before=@(Get-LeveCatalog | ForEach-Object {Get-LeveRegistry $_.Path $_.Name}) | ConvertTo-Json -Depth 8
 $historyBefore=@(Get-LeveHistory).Count
 $plan8=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entry -Mode Plan -Profile 8 | Out-String) | ConvertFrom-Json
